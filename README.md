@@ -71,7 +71,9 @@ Tip: If `Config.UseTarget = false`, markers/text UI will appear instead of targe
 ## 🤝 Credits
 
 - Inspired by `esx-qalle-sellvehicles`  
-- Built and maintained by **Plenix Network**
+
+---
 
 ## 📄 License
-This project is licensed under the MIT License.
+
+This project is licensed under the **MIT License**.
