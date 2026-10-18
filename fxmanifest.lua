@@ -5,7 +5,7 @@ lua54 'yes'
 name 'plenix-fivem-sell-vehicles'
 author 'Plenix Network'
 description 'Players sell their vehicles to other players.'
-version '2.0.0'
+version '2.1.0'
 
 shared_scripts {
     '@es_extended/imports.lua',
