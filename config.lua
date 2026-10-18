@@ -34,3 +34,9 @@ Config.ViewVehicles = {
 -- 💰 Tax Settings
 Config.ReturnCarToOwnerTax = 0.1 -- Tax applied when owner takes back their car from dealership (default 10%)
 Config.SellCarTax = 0.1          -- Tax applied when selling a car through the dealership (default 10%)
+
+-- 🅿️ Garage the bought/returned vehicle is stored in (only used if your owned_vehicles table has a garage_id or parking column)
+Config.Garage = "Legion Square"
+
+-- Maximum price a player can list a vehicle for
+Config.MaxPrice = 100000000

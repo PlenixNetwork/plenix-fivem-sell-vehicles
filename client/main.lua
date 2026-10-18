@@ -74,7 +74,7 @@ Citizen.CreateThread(function()
                 })
                 if not money then return end
 
-                local price = tonumber(money[1])
+                local price = math.floor(tonumber(money[1]) or 0)
                 if not price or price <= 0 then
                     ESX.ShowNotification(locale('sell_vehicle_price_invalid'), "error")
                     return
@@ -166,7 +166,7 @@ Citizen.CreateThread(function ()
             Citizen.Wait(1)
         end
 
-        if showingVehicle ~= -1 or showingVehicle ~= 0 then
+        if showingVehicle ~= -1 and showingVehicle ~= 0 then
             if DoesEntityExist(showingVehicle) then
                 DeleteEntity(showingVehicle)
                 showingVehicle = 0
@@ -187,10 +187,11 @@ function SpawnVehicle(id)
     loadingCar = true
 
     local vehicleProps = json.decode(vehicle[1].vehicleProps or "{}")
+    local listingId = vehicle[1].id
     showingVehiclePrice = formatMoney(vehicle[1].price or 0)
     showingVehicleOwner = vehicle[1].seller or "unknown"
 
-    ESX.Game.SpawnLocalVehicle(vehicleProps.model, Config.ViewVehicles.position, Config.ViewVehicles.position.w, function (veh)
+    ESX.Game.SpawnLocalVehicle(vehicleProps.model, Config.ViewVehicles.position.xyz, Config.ViewVehicles.position.w, function (veh)
         lib.setVehicleProperties(veh, vehicleProps)
         SetVehicleLights(veh, 2)
         SetVehicleLightsMode(veh, 2)
@@ -199,7 +200,7 @@ function SpawnVehicle(id)
         FreezeEntityPosition(veh, true)
 
         showingVehicle = veh
-        showingVehicleId = id
+        showingVehicleId = listingId -- real listing id from the database
 
         local min, max = GetModelDimensions(GetEntityModel(veh))
         local height = max.z - min.z
@@ -212,21 +213,20 @@ end
 Citizen.CreateThread(function ()
     while true do
         local sleep = 500
-        local PlayerPed = ESX.PlayerData.ped
-        local PlayerCoords = GetEntityCoords(PlayerPed)
-        local distance = #(PlayerCoords - vector3(Config.ViewVehicles.position.x, Config.ViewVehicles.position.y, Config.ViewVehicles.position.z))
+        local PlayerCoords = GetEntityCoords(PlayerPedId())
+        local distance = #(PlayerCoords - Config.ViewVehicles.position.xyz)
         if distance < Config.ViewVehicles.spawnDistance then
             sleep = 0
         else
             goto continue
         end
         if showingVehicle == -1 then
-            ESX.Game.Utils.DrawText3D(Config.ViewVehicles.position, locale('no_vehicle_for_sale'), 1.0)
+            ESX.Game.Utils.DrawText3D(Config.ViewVehicles.position.xyz, locale('no_vehicle_for_sale'), 1.0)
             goto continue
         end
 
         if loadingCar or showingVehiclePrice == 0 then
-            ESX.Game.Utils.DrawText3D(Config.ViewVehicles.position, locale('loading_vehicle'), 1.0)
+            ESX.Game.Utils.DrawText3D(Config.ViewVehicles.position.xyz, locale('loading_vehicle'), 1.0)
             goto continue
         end
 
@@ -246,9 +246,8 @@ AddEventHandler('plenix-sell-vehicles:viewVehicle', function(data)
         showingVehicle = 0
     end
 
-    local PlayerPed = ESX.PlayerData.ped
-    local PlayerCoords = GetEntityCoords(PlayerPed)
-    local distance = #(PlayerCoords - vector3(Config.ViewVehicles.position.x, Config.ViewVehicles.position.y, Config.ViewVehicles.position.z))
+    local PlayerCoords = GetEntityCoords(PlayerPedId())
+    local distance = #(PlayerCoords - Config.ViewVehicles.position.xyz)
     if distance > Config.ViewVehicles.spawnDistance then
         return
     end
@@ -259,14 +258,17 @@ end)
 
 RegisterNetEvent('plenix-sell-vehicles:removedVehicle')
 AddEventHandler('plenix-sell-vehicles:removedVehicle', function(data)
-    if showingVehicleId == data then
-        if showingVehicle ~= 0 then
-            if DoesEntityExist(showingVehicle) then
-                DeleteEntity(showingVehicle)
-                SpawnVehicle(0)
-            end
-            showingVehicle = 0
-            showingVehicleId = 0
+    if showingVehicleId == data and showingVehicle ~= 0 then
+        if DoesEntityExist(showingVehicle) then
+            DeleteEntity(showingVehicle)
+        end
+        showingVehicle = 0
+        showingVehicleId = 0
+
+        -- Show the next listing if the player is still at the dealership
+        local coords = GetEntityCoords(PlayerPedId())
+        if #(coords - Config.ViewVehicles.position.xyz) < Config.ViewVehicles.spawnDistance then
+            SpawnVehicle(0)
         end
     end
 
@@ -331,7 +333,6 @@ function formatMoney(amount)
     return formatted
 end
 
-RegisterNetEvent('onResourceStop')
 AddEventHandler('onResourceStop', function(resource)
     if resource == GetCurrentResourceName() then
         RemoveBlip(SellPointBlip)

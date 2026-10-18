@@ -1,227 +1,226 @@
 lib.locale()
 
-lib.callback.register('plenix-sell-vehicles:checkCar', function (source, vehicle, vehiclePlate)
-    local xPlayer = ESX.GetPlayerFromId(source)
+-----------------------------------------------------------
+-- owned_vehicles column detection
+-- ESX servers have different owned_vehicles schemas (in_garage, garage_id, mileage, parking...).
+-- Inserting into a column that doesn't exist fails, so only use the ones that are there.
+-----------------------------------------------------------
+local ownedVehicleColumns = {}
 
-    local response = MySQL.query.await('SELECT owner FROM owned_vehicles WHERE owner = @owner AND plate = @plate LIMIT 1', {
-        ['@owner'] = xPlayer.getIdentifier(),
-        ['@plate'] = vehiclePlate
+MySQL.ready(function()
+    local columns = MySQL.query.await([[
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'owned_vehicles'
+    ]]) or {}
+
+    for _, c in ipairs(columns) do
+        ownedVehicleColumns[c.COLUMN_NAME] = true
+    end
+end)
+
+local function InsertOwnedVehicle(owner, vehicleProps, mileage)
+    local columns = { 'owner', 'plate', 'vehicle' }
+    local values = { owner, vehicleProps.plate, json.encode(vehicleProps) }
+
+    local optional = {
+        { 'type', 'car' },
+        { 'stored', 1 },
+        { 'in_garage', 1 },
+        { 'garage_id', Config.Garage },
+        { 'parking', Config.Garage },
+        { 'mileage', mileage or 0 },
+    }
+
+    for _, col in ipairs(optional) do
+        if ownedVehicleColumns[col[1]] then
+            columns[#columns + 1] = col[1]
+            values[#values + 1] = col[2]
+        end
+    end
+
+    local placeholders = string.rep('?', #columns, ', ')
+    local query = ('INSERT INTO owned_vehicles (`%s`) VALUES (%s)'):format(table.concat(columns, '`, `'), placeholders)
+
+    local ok, id = pcall(MySQL.insert.await, query, values)
+    return ok and id ~= nil
+end
+
+local function GetListing(id)
+    id = tonumber(id)
+    if not id then return nil end
+
+    return MySQL.single.await('SELECT id, seller, vehicleProps, mileage, price FROM vehicles_for_sale WHERE id = ?', { id })
+end
+
+-- Deletes the listing and reports whether *we* removed it (prevents two players buying the same car)
+local function ClaimListing(id)
+    local affected = MySQL.update.await('DELETE FROM vehicles_for_sale WHERE id = ?', { id })
+    return affected and affected > 0
+end
+
+-----------------------------------------------------------
+-- Callbacks
+-----------------------------------------------------------
+lib.callback.register('plenix-sell-vehicles:checkCar', function(source, vehicle, vehiclePlate)
+    local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return false end
+
+    local response = MySQL.scalar.await('SELECT 1 FROM owned_vehicles WHERE owner = ? AND plate = ? LIMIT 1', {
+        xPlayer.getIdentifier(), vehiclePlate
     })
 
-    if response then
-        if #response > 0 then
-            return true
-        else
-            return false
-        end
-    else
-        return false
-    end
+    return response ~= nil
 end)
 
 lib.callback.register('plenix-sell-vehicles:putOnSale', function(source, money, vehicleProps)
     local xPlayer = ESX.GetPlayerFromId(source)
-    local plate = vehicleProps.plate
-
-    local response = MySQL.query.await('SELECT owner, mileage FROM owned_vehicles WHERE owner = @owner AND plate = @plate LIMIT 1', {
-        ['@owner'] = xPlayer.getIdentifier(),
-        ['@plate'] = plate
-    })
-
-    if not response then
+    if not xPlayer or type(vehicleProps) ~= 'table' or not vehicleProps.plate then
         return false
     end
 
-    if #response == 0 then
+    -- Never trust the client price (negative prices would pay the buyer)
+    local price = math.floor(tonumber(money) or 0)
+    if price <= 0 or price > (Config.MaxPrice or 100000000) then
         return false
     end
 
-    local mileage = response[1].mileage or 0
-
-    MySQL.insert.await('INSERT INTO vehicles_for_sale (seller, vehicleProps, mileage, price) VALUES (@seller, @vehicleProps, @mileage, @price)', {
-        ['@seller'] = xPlayer.getIdentifier(),
-        ['@vehicleProps'] = json.encode(vehicleProps),
-        ['@mileage'] = mileage,
-        ['@price'] = money
+    local owned = MySQL.single.await('SELECT * FROM owned_vehicles WHERE owner = ? AND plate = ? LIMIT 1', {
+        xPlayer.getIdentifier(), vehicleProps.plate
     })
+    if not owned then
+        return false
+    end
 
-    MySQL.update.await('DELETE FROM owned_vehicles WHERE plate = @plate', {
-        ['@plate'] = plate
+    -- The model must match what's stored, so a modified client can't list a different car
+    local storedProps = json.decode(owned.vehicle or '{}') or {}
+    if storedProps.model and tonumber(storedProps.model) ~= tonumber(vehicleProps.model) then
+        return false
+    end
+
+    local listingId = MySQL.insert.await('INSERT INTO vehicles_for_sale (seller, vehicleProps, mileage, price) VALUES (?, ?, ?, ?)', {
+        xPlayer.getIdentifier(), json.encode(vehicleProps), owned.mileage or 0, price
+    })
+    if not listingId then
+        return false
+    end
+
+    MySQL.update.await('DELETE FROM owned_vehicles WHERE owner = ? AND plate = ?', {
+        xPlayer.getIdentifier(), vehicleProps.plate
     })
 
     return true
 end)
 
-lib.callback.register('plenix-sell-vehicles:getNumberOfCars', function (source)
+-- id = listing id, or 0/nil for the first listing
+lib.callback.register('plenix-sell-vehicles:getVehicleForSale', function(source, id)
+    id = tonumber(id) or 0
+
+    local listing = id > 0 and GetListing(id) or nil
+    if not listing then
+        listing = MySQL.single.await('SELECT id, seller, vehicleProps, price FROM vehicles_for_sale ORDER BY id LIMIT 1')
+    end
+
+    return listing and { listing } or {}
+end)
+
+lib.callback.register('plenix-sell-vehicles:getVehiclesForSale', function(source)
+    return MySQL.query.await('SELECT id, seller, vehicleProps, mileage, price FROM vehicles_for_sale ORDER BY id') or {}
+end)
+
+-----------------------------------------------------------
+-- Buy / Return
+-----------------------------------------------------------
+RegisterNetEvent('plenix-sell-vehicles:buyVehicle', function(id)
+    local source = source
     local xPlayer = ESX.GetPlayerFromId(source)
-    local plate = GetVehicleNumberPlateText(GetVehiclePedIsIn(GetPlayerPed(source), false))
+    if not xPlayer then return end
 
-    local result = MySQL.query.await('SELECT COUNT(*) FROM vehicles_for_sale')
-
-    return result
-end)
-
-lib.callback.register('plenix-sell-vehicles:getVehicleForSale', function (source, index)
-    if index ~= '0' then
-        index = tonumber(index)
-    else
-        index = 0
+    local listing = GetListing(id)
+    if not listing then
+        xPlayer.showNotification(locale('no_vehicle_for_sale'))
+        return
     end
 
-    if index == nil then
-        error("Invalid index")
+    local price = listing.price
+    if xPlayer.getMoney() < price then
+        xPlayer.showNotification(locale('not_enough_money'))
+        return
     end
 
-    local result = MySQL.query.await('SELECT vehicleProps, seller, price FROM vehicles_for_sale LIMIT 1 OFFSET @index', {
-        ['@index'] = index
-    })
-
-    return result
-end)
-
-lib.callback.register('plenix-sell-vehicles:getVehiclesForSale', function (source)
-    local result = MySQL.query.await('SELECT * FROM vehicles_for_sale')
-
-    local id = 0
-    for k, v in pairs(result) do
-        v.id = id
-        id = id + 1
+    if not ClaimListing(listing.id) then
+        xPlayer.showNotification(locale('no_vehicle_for_sale'))
+        return
     end
 
-    return result
-end)
+    local vehicleProps = json.decode(listing.vehicleProps)
 
-RegisterNetEvent('plenix-sell-vehicles:buyVehicle')
-AddEventHandler('plenix-sell-vehicles:buyVehicle', function (index)
-    local xPlayer = ESX.GetPlayerFromId(source)
-
-    if index ~= '0' then
-        index = tonumber(index)
-    else
-        index = 0
-    end
-
-    if index == nil then
-        error("Invalid index")
-    end
-
-    local result = MySQL.query.await('SELECT id, seller, vehicleProps, mileage, price FROM vehicles_for_sale LIMIT 1 OFFSET @index', {
-        ['@index'] = index
-    })
-
-    if result[1] then
-        local seller = result[1].seller
-        local vehicleProps = json.decode(result[1].vehicleProps)
-        local mileage = result[1].mileage
-        local price = result[1].price
-
-        if xPlayer.getMoney() >= price then
-            xPlayer.removeMoney(price)
-            UpdateCash(seller, price - (price * (Config.SellCarTax or 0.1)))
-
-            MySQL.insert.await([[
-                INSERT INTO owned_vehicles 
-                (owner, plate, vehicle, type, stored, in_garage, garage_id, mileage)
-                VALUES 
-                (@owner, @plate, @vehicle, "car", 1, 1, @location, @mileage)
-            ]], {
-                ['@owner'] = xPlayer.getIdentifier(),
-                ['@plate'] = vehicleProps.plate,
-                ['@vehicle'] = json.encode(vehicleProps),
-                ['@location'] = "Legion Square",
-                ['@mileage'] = mileage
-            })
-
-            MySQL.update.await('DELETE FROM vehicles_for_sale WHERE id = @id', {
-                ['@id'] = result[1].id
-            })
-
-            TriggerClientEvent('plenix-sell-vehicles:removedVehicle', -1, index)
-
-            xPlayer.showNotification(locale('vehicle_bought', price))
-        else
-            xPlayer.showNotification(locale('not_enough_money'))
-        end
-    end
-end)
-
-RegisterNetEvent('plenix-sell-vehicles:returnVehicle')
-AddEventHandler('plenix-sell-vehicles:returnVehicle', function (index)
-    local xPlayer = ESX.GetPlayerFromId(source)
-
-    if index ~= '0' then
-        index = tonumber(index)
-    else
-        index = 0
-    end
-
-    if index == nil then
-        error("Invalid index")
-    end
-
-    local result = MySQL.query.await('SELECT id, seller, vehicleProps, mileage, price FROM vehicles_for_sale LIMIT 1 OFFSET @index', {
-        ['@index'] = index
-    })
-
-    if result[1] then
-        local seller = result[1].seller
-        local vehicleProps = json.decode(result[1].vehicleProps)
-        local mileage = result[1].mileage
-        if seller ~= xPlayer.getIdentifier() then
-            xPlayer.showNotification(locale('not_your_vehicle'))
-            return
-        end
-
-        MySQL.insert.await([[
-            INSERT INTO owned_vehicles 
-            (owner, plate, vehicle, type, stored, in_garage, garage_id, mileage) 
-            VALUES 
-            (@owner, @plate, @vehicle, "car", 1, 1, @location, @mileage)
-        ]], {
-            ['@owner'] = seller,
-            ['@plate'] = vehicleProps.plate,
-            ['@vehicle'] = json.encode(vehicleProps),
-            ['@location'] = "Legion Square",
-            ['@mileage'] = mileage
+    if not InsertOwnedVehicle(xPlayer.getIdentifier(), vehicleProps, listing.mileage) then
+        -- Put the listing back so nothing is lost
+        MySQL.insert.await('INSERT INTO vehicles_for_sale (id, seller, vehicleProps, mileage, price) VALUES (?, ?, ?, ?, ?)', {
+            listing.id, listing.seller, listing.vehicleProps, listing.mileage, listing.price
         })
-
-        MySQL.update.await('DELETE FROM vehicles_for_sale WHERE id = @id', {
-            ['@id'] = result[1].id
-        })
-
-        TriggerClientEvent('plenix-sell-vehicles:removedVehicle', -1, index)
-
-        xPlayer.showNotification(locale('vehicle_returned'))
+        xPlayer.showNotification(locale('sell_vehicle_error'))
+        return
     end
+
+    xPlayer.removeMoney(price)
+    UpdateCash(listing.seller, math.floor(price - (price * (Config.SellCarTax or 0.1))))
+
+    TriggerClientEvent('plenix-sell-vehicles:removedVehicle', -1, listing.id)
+    xPlayer.showNotification(locale('vehicle_bought', price))
 end)
 
+RegisterNetEvent('plenix-sell-vehicles:returnVehicle', function(id)
+    local source = source
+    local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return end
+
+    local listing = GetListing(id)
+    if not listing then
+        xPlayer.showNotification(locale('no_vehicle_for_sale'))
+        return
+    end
+
+    if listing.seller ~= xPlayer.getIdentifier() then
+        xPlayer.showNotification(locale('not_your_vehicle'))
+        return
+    end
+
+    if not ClaimListing(listing.id) then
+        return
+    end
+
+    if not InsertOwnedVehicle(listing.seller, json.decode(listing.vehicleProps), listing.mileage) then
+        MySQL.insert.await('INSERT INTO vehicles_for_sale (id, seller, vehicleProps, mileage, price) VALUES (?, ?, ?, ?, ?)', {
+            listing.id, listing.seller, listing.vehicleProps, listing.mileage, listing.price
+        })
+        xPlayer.showNotification(locale('vehicle_return_error'))
+        return
+    end
+
+    TriggerClientEvent('plenix-sell-vehicles:removedVehicle', -1, listing.id)
+    xPlayer.showNotification(locale('vehicle_returned'))
+end)
+
+-----------------------------------------------------------
+-- Pay the seller (online or offline)
+-----------------------------------------------------------
 function UpdateCash(identifier, cash)
-	local xPlayer = ESX.GetPlayerFromIdentifier(identifier)
+    local xPlayer = ESX.GetPlayerFromIdentifier(identifier)
 
-	if xPlayer ~= nil then
-		xPlayer.addAccountMoney("bank", cash)
-
+    if xPlayer then
+        xPlayer.addAccountMoney('bank', cash)
         xPlayer.showNotification(locale('vehicle_sold', cash))
-	else
-		MySQL.Async.fetchAll('SELECT accounts FROM users WHERE identifier = @identifier', { ["@identifier"] = identifier }, function(result)
-		    if result[1]["accounts"] ~= nil then
-	       		local accountsData = json.decode(result[1]["accounts"]) 
-        			accountsData["bank"] = accountsData["bank"] + cash
+        return
+    end
 
-        			MySQL.Async.execute("UPDATE users SET accounts = @newBank WHERE identifier = @identifier",
-            		{
-                			["@identifier"] = identifier,
-                			["@newBank"] = json.encode(accountsData) 
-            		})
-    		    end
-		end)
-	end
-end
+    local accounts = MySQL.scalar.await('SELECT accounts FROM users WHERE identifier = ?', { identifier })
+    if not accounts then return end
 
-Trim = function(word)
-	if word ~= nil then
-		return word:match("^%s*(.-)%s*$")
-	else
-		return nil
-	end
+    local accountsData = json.decode(accounts) or {}
+    accountsData.bank = (accountsData.bank or 0) + cash
+
+    MySQL.update.await('UPDATE users SET accounts = ? WHERE identifier = ?', {
+        json.encode(accountsData), identifier
+    })
 end
