@@ -24,5 +24,7 @@
     "not_your_vehicle": "Este no es tu vehículo",
     "vehicle_returned": "Vehículo devuelto al ~g~garaje central~s~",
     "vehicle_return_error": "Ocurrió un error al devolver el vehículo",
+    "vehicle_returned_fee": "Vehículo devuelto al ~g~garaje central~s~ - Tasa pagada: ~r~%s~s~€",
+    "not_enough_money_fee": "Necesitas %s€ para pagar la tasa de devolución",
     "vehicle_bought": "Vehículo comprado por ~g~%s~s~€ - Desplazado a ~g~garaje central~s~"
 }

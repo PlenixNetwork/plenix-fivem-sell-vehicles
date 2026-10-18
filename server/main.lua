@@ -186,6 +186,20 @@ RegisterNetEvent('plenix-sell-vehicles:returnVehicle', function(id)
         return
     end
 
+    -- Return fee (Config.ReturnCarToOwnerTax of the listing price), paid from cash first, then bank
+    local fee = math.floor(listing.price * (Config.ReturnCarToOwnerTax or 0))
+    local feeAccount = nil
+    if fee > 0 then
+        if xPlayer.getMoney() >= fee then
+            feeAccount = 'money'
+        elseif (((xPlayer.getAccount('bank') or {}).money) or 0) >= fee then
+            feeAccount = 'bank'
+        else
+            xPlayer.showNotification(locale('not_enough_money_fee', fee))
+            return
+        end
+    end
+
     if not ClaimListing(listing.id) then
         return
     end
@@ -198,8 +212,16 @@ RegisterNetEvent('plenix-sell-vehicles:returnVehicle', function(id)
         return
     end
 
+    if feeAccount then
+        xPlayer.removeAccountMoney(feeAccount, fee)
+    end
+
     TriggerClientEvent('plenix-sell-vehicles:removedVehicle', -1, listing.id)
-    xPlayer.showNotification(locale('vehicle_returned'))
+    if fee > 0 then
+        xPlayer.showNotification(locale('vehicle_returned_fee', fee))
+    else
+        xPlayer.showNotification(locale('vehicle_returned'))
+    end
 end)
 
 -----------------------------------------------------------

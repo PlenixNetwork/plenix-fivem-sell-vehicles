@@ -24,5 +24,7 @@
     "not_your_vehicle": "This is not your vehicle",
     "vehicle_returned": "Vehicle returned to the ~g~central garage~s~",
     "vehicle_return_error": "An error occurred while returning the vehicle",
+    "vehicle_returned_fee": "Vehicle returned to the ~g~central garage~s~ - Fee paid: ~r~%s~s~€",
+    "not_enough_money_fee": "You need %s€ to pay the return fee",
     "vehicle_bought": "Vehicle bought for ~g~%s~s~€ - Moved to ~g~central garage~s~"
 }
